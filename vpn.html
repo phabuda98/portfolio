@@ -1,0 +1,83 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Secure site-to-site connectivity — Network Engineering Lab</title><link rel="stylesheet" href="style.css"></head><body><header class="wrap"><a href="index.html#projects">Back to portfolio</a><a href="assets/network-labs.zip" download>Download all labs</a></header><main class="wrap lab-page"><p class="eyebrow">NETWORK ENGINEERING / LAB PROJECT</p><h1>Secure site-to-site connectivity</h1><p class="intro">IKEv2 IPsec with explicit forwarding policies and failure tests.</p><p class="lab-status">Configurations and test plan available · Live network validation pending</p><h2>Setup & validation guide</h2><pre># IKEv2 site-to-site lab
+
+Use two disposable Ubuntu 24.04 VMs with two adapters each, plus a Linux client behind each gateway. Use an isolated virtual WAN network; never assign these documentation addresses to a real internet interface.
+
+| Node | WAN | LAN | Client |
+|---|---|---|---|
+| Site A gateway | 192.0.2.10/24 | 10.1.0.1/24 | 10.1.0.10/24, gateway 10.1.0.1 |
+| Site B gateway | 192.0.2.20/24 | 10.2.0.1/24 | 10.2.0.10/24, gateway 10.2.0.1 |
+
+Configure these addresses with your VM network manager. WAN interfaces share one isolated virtual switch; each LAN has its own isolated switch. Interface names in firewall scripts default to ens3 (WAN) / ens4 (LAN).
+
+## Install on both gateways
+```sh
+sudo apt update
+sudo apt install charon-systemd strongswan-swanctl iptables tcpdump
+sudo sysctl -w net.ipv4.ip_forward=1
+sudo sysctl -w net.ipv4.conf.all.rp_filter=0
+sudo sysctl -w net.ipv4.conf.default.rp_filter=0
+```
+Disable strict rp_filter on the existing WAN/LAN interfaces too (`net.ipv4.conf.ens3.rp_filter=0`, `ens4` likewise, adapting names). These sysctls are temporary. Set them in /etc/sysctl.d/90-vpn-lab.conf if needed across reboots.
+
+Generate one shared random PSK using `openssl rand -hex 32`. On BOTH gateways create /etc/swanctl/secrets.conf with the SAME value:
+```text
+secrets {
+ ike-lab {
+  id-a = site-a
+  id-b = site-b
+  secret = &quot;YOUR_GENERATED_PSK&quot;
+ }
+}
+```
+Protect this file with `sudo chmod 600 /etc/swanctl/secrets.conf`. Do not commit it. Copy the correct site-a or site-b swanctl.conf to /etc/swanctl/swanctl.conf. The include resolves alongside that file.
+
+Add a route on A: `sudo ip route replace 10.2.0.0/24 via 192.0.2.20`; on B: `sudo ip route replace 10.1.0.0/24 via 192.0.2.10`. The policy encrypts matching traffic before WAN transmission. Run the corresponding firewall script as root after confirming interface names. It replaces the lab VM FORWARD rules; INPUT/OUTPUT stay under your existing policy. Allow UDP 500/4500 and IP protocol 50 between WAN peers if you enabled an INPUT firewall. No NAT is used.
+
+Start B first, then A:
+```sh
+sudo systemctl enable --now strongswan
+sudo swanctl --load-all
+sudo swanctl --list-sas
+```
+On A, retry with `sudo swanctl --initiate --child lan` if B was not ready.
+
+## Verify and diagnose
+- Ping 10.2.0.10 from client A: expected allowed; SA byte counters increase.
+- Capture on WAN with `sudo tcpdump -ni ens3 &#x27;esp or udp port 4500 or udp port 500&#x27;`: expect encrypted ESP (or encapsulated ESP), never cleartext client ICMP.
+- `sudo ip xfrm state` and `sudo ip xfrm policy` confirm kernel state and selectors.
+- `sudo iptables -vnL FORWARD` confirms policy-matched traffic counters.
+- Terminate with `sudo swanctl --terminate --ike campus`: cross-site client ping must fail, even with cleartext routes present, because forwarding requires IPsec policy. Initiate again to restore.
+- Test wrong PSK on B, reload, terminate and reinitiate: authentication should fail. Restore the matching PSK.
+- For failures, check WAN reachability, IDs/PSK, selectors, client gateways, routes, forwarding, rp_filter and `journalctl -u strongswan`.
+
+Runtime results have not been collected. Record your output using ../RESULTS.md. Remove these disposable VMs for cleanup; no production machines should be changed.
+
+References: https://docs.strongswan.org/docs/latest/swanctl/swanctlConf.html and https://docs.strongswan.org/docs/latest/config/quickstart.html
+</pre><h2>Configuration preview</h2><pre>connections {
+ campus {
+  version = 2
+  local_addrs = 192.0.2.10
+  remote_addrs = 192.0.2.20
+  proposals = aes256-sha256-modp2048
+  local {
+   auth = psk
+   id = site-a
+  }
+  remote {
+   auth = psk
+   id = site-b
+  }
+  children {
+   lan {
+    local_ts = 10.1.0.0/24
+    remote_ts = 10.2.0.0/24
+    esp_proposals = aes256-sha256-modp2048
+    start_action = start
+    dpd_action = restart
+   }
+  }
+  dpd_delay = 30s
+ }
+}
+include secrets.conf
+</pre></main></body></html>

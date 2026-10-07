@@ -1,0 +1,82 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Segmented campus network — Network Engineering Lab</title><link rel="stylesheet" href="style.css"></head><body><header class="wrap"><a href="index.html#projects">Back to portfolio</a><a href="assets/network-labs.zip" download>Download all labs</a></header><main class="wrap lab-page"><p class="eyebrow">NETWORK ENGINEERING / LAB PROJECT</p><h1>Segmented campus network</h1><p class="intro">VLANs, IPv4 ACLs, inter-VLAN routing and OSPF.</p><p class="lab-status">Configurations and test plan available · Live network validation pending</p><h2>Setup & validation guide</h2><pre># Segmented campus network
+
+## Goal and topology
+Build in GNS3 or EVE-NG with licensed Cisco IOSvL2 multilayer-capable images and an IOSv router. Some images require `switchport trunk encapsulation dot1q` before trunk mode. The configurations use Gi0/x; map to your image. There is one uplink, so this lab tests failure detection, not high availability.
+
+```mermaid
+flowchart TD
+ EDGE[&quot;EDGE / OSPF&quot;] --- CORE[&quot;CORE / VLAN gateways&quot;]
+ CORE --- ACCESS[&quot;ACCESS / 802.1Q trunk&quot;]
+ ACCESS --- USER[&quot;Users / VLAN 10&quot;]
+ ACCESS --- SERVER[&quot;Servers / VLAN 20&quot;]
+ ACCESS --- GUEST[&quot;Guests / VLAN 30&quot;]
+```
+
+| Segment | Host | Gateway |
+|---|---|---|
+| Users / VLAN 10 | 10.10.10.10/24 | 10.10.10.1 |
+| Servers / VLAN 20 | 10.10.20.10/24 | 10.10.20.1 |
+| Guests / VLAN 30 | 10.10.30.10/24 | 10.10.30.1 |
+| CORE to EDGE | 10.10.254.1/30 and .2/30 | Direct link |
+| Simulated external endpoint | EDGE loopback 198.51.100.1/32 | OSPF |
+
+Connect ACCESS Gi0/0 to CORE Gi0/0, CORE Gi0/1 to EDGE Gi0/0. Attach the three hosts to ACCESS Gi0/1, Gi0/2, Gi0/3 respectively. Assign host IPs and default gateways manually. Apply the matching configs via console and save using `copy running-config startup-config`. VLAN SVIs require an active member port/trunk.
+
+## Policy
+Users may reach servers. Guests may ping their gateway and access the simulated external endpoint, but cannot reach RFC1918 destinations. This is a stateless IPv4 ACL lab, not a complete production security policy. IPv6 is outside scope. No internet, NAT, DHCP, or DNS is configured.
+
+## Validation (expected results, not recorded results)
+- `show vlan brief`: access ports assigned to VLANs 10, 20, 30.
+- `show interfaces trunk`: all three VLANs allowed and forwarding.
+- `show ip ospf neighbor`: CORE and EDGE reach FULL.
+- `show ip route ospf`: CORE learns 198.51.100.1; EDGE learns three /24 routes.
+- User ping 10.10.20.10: allowed; guest ping 10.10.20.10: blocked.
+- Guest ping 10.10.30.1 and 198.51.100.1: allowed.
+- `show access-lists GUEST-IN`: deny counter rises during blocked guest tests.
+- Shut CORE Gi0/1: external reachability fails, inter-VLAN routing remains. Bring it up: neighbor and route recover. Capture timestamps rather than inventing convergence figures.
+
+Save command output and screenshots in `evidence/`; use ../RESULTS.md. Troubleshoot host gateway, active VLANs, trunk lists, ACL direction, and OSPF area/subnet in that order.
+
+Reference: https://www.cisco.com/c/en/us/td/docs/routers/ios-xe/ip-routing/b-ip-routing/m_iri-default-passive-interface.html
+</pre><h2>Configuration preview</h2><pre>! Cisco IOSvL2 / multilayer switch lab; adapt interface names to your image.
+hostname CORE
+ip routing
+vlan 10
+ name USERS
+vlan 20
+ name SERVERS
+vlan 30
+ name GUESTS
+interface GigabitEthernet0/0
+ switchport mode trunk
+ switchport trunk allowed vlan 10,20,30
+ no shutdown
+interface Vlan10
+ ip address 10.10.10.1 255.255.255.0
+ no shutdown
+interface Vlan20
+ ip address 10.10.20.1 255.255.255.0
+ no shutdown
+interface Vlan30
+ ip address 10.10.30.1 255.255.255.0
+ ip access-group GUEST-IN in
+ no shutdown
+interface GigabitEthernet0/1
+ no switchport
+ ip address 10.10.254.1 255.255.255.252
+ no shutdown
+ip access-list extended GUEST-IN
+ permit icmp 10.10.30.0 0.0.0.255 host 10.10.30.1 echo
+ deny ip 10.10.30.0 0.0.0.255 10.0.0.0 0.255.255.255 log
+ deny ip 10.10.30.0 0.0.0.255 172.16.0.0 0.15.255.255 log
+ deny ip 10.10.30.0 0.0.0.255 192.168.0.0 0.0.255.255 log
+ permit ip 10.10.30.0 0.0.0.255 any
+router ospf 1
+ router-id 1.1.1.1
+ passive-interface default
+ no passive-interface GigabitEthernet0/1
+ network 10.10.10.0 0.0.0.255 area 0
+ network 10.10.20.0 0.0.0.255 area 0
+ network 10.10.30.0 0.0.0.255 area 0
+ network 10.10.254.0 0.0.0.3 area 0
+</pre></main></body></html>

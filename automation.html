@@ -1,0 +1,89 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Configuration backup workflow — Network Engineering Lab</title><link rel="stylesheet" href="style.css"></head><body><header class="wrap"><a href="index.html#projects">Back to portfolio</a><a href="assets/network-labs.zip" download>Download all labs</a></header><main class="wrap lab-page"><p class="eyebrow">NETWORK ENGINEERING / LAB PROJECT</p><h1>Configuration backup workflow</h1><p class="intro">Read-only SSH backups, timestamped files and SHA-256 checks.</p><p class="lab-status">Configurations and test plan available · Live network validation pending</p><h2>Setup & validation guide</h2><pre># Configuration backup workflow
+
+Python 3.10+; Cisco IOS SSH devices with an account authorized for `show running-config`. This is read-only. The inventory contains example addresses: replace them with reachable SSH management addresses. The campus lab configs do not configure SSH; provision SSH and your own credentials separately.
+
+```sh
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -r requirements.txt
+python backup.py --demo
+python backup.py --inventory inventory.json
+```
+
+Demo mode requires no Netmiko installation and writes clearly marked synthetic configurations. Real mode prompts for username/password, or accepts NET_USERNAME / NET_PASSWORD / NET_SECRET through the environment. If the account starts in user mode, supply NET_SECRET for enable mode. Do not put credentials in inventory or Git.
+
+Verify device host-key fingerprints through a trusted console, then add the verified keys to ~/.ssh/known_hosts. Strict checking rejects unknown or changed keys. Each device has timestamped files and SHA-256 sidecars, and one failed device does not prevent other backups. Exit status 1 indicates at least one failure.
+
+Compare two files with `diff -u older.cfg newer.cfg`; verify a backup with `sha256sum -c timestamp.sha256` from its directory. SHA-256 detects accidental changes; it is not an authenticity signature.
+
+## Schedule
+Run under a dedicated account, with securely supplied credentials and verified known_hosts. Example cron entry (replace absolute paths):
+```text
+0 2 * * * /srv/network-backups/.venv/bin/python /srv/network-backups/backup.py --inventory /srv/network-backups/inventory.json --output /srv/network-backups/backups &gt;&gt; /srv/network-backups/backup.log 2&gt;&amp;1
+```
+Prompting cannot work in cron. Configure credentials through your scheduler/secret manager. Secure raw backups, which may contain secrets. Keep them out of the public website and Git; publish only redacted samples. Add your own retention policy.
+
+## Restore drill
+Use a disposable matching IOS lab device. Compare current and saved configs, inspect interface mapping and credentials, then transfer the selected backup to a private lab SCP server. With console access, use the image-supported `configure replace` procedure or manually apply reviewed differences. Verify routes, VLANs and access policy before saving. This tool never performs a restore automatically.
+
+Expected checks: demo writes files; correct credentials save real configurations; unknown host key and wrong password fail; SHA-256 matches; changed config produces a meaningful diff. Record actual results in ../RESULTS.md.
+
+Reference: https://ktbyers.github.io/netmiko/docs/netmiko/
+</pre><h2>Configuration preview</h2><pre>&quot;&quot;&quot;Read-only Cisco configuration backups. Never pushes configuration.&quot;&quot;&quot;
+import argparse, datetime, getpass, hashlib, json, os, re, sys
+from pathlib import Path
+
+def save_backup(folder, name, text):
+    if not re.fullmatch(r&quot;[A-Za-z0-9_-]+&quot;, name):
+        raise ValueError(&quot;Device name must contain only letters, digits, _ or -&quot;)
+    if not text.strip() or text.lstrip().startswith((&quot;%&quot;, &quot;Invalid&quot;, &quot;Error&quot;)):
+        raise ValueError(&quot;Empty or rejected device response&quot;)
+    folder = Path(folder) / name
+    folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime(&quot;%Y%m%dT%H%M%S.%fZ&quot;)
+    path = folder / (stamp + &quot;.cfg&quot;)
+    with path.open(&quot;x&quot;) as file:
+        os.chmod(path, 0o600)
+        file.write(text.rstrip() + &quot;\n&quot;)
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    path.with_suffix(&quot;.sha256&quot;).write_text(digest + &quot;  &quot; + path.name + &quot;\n&quot;)
+    return path
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(&quot;--inventory&quot;, default=&quot;inventory.json&quot;)
+    parser.add_argument(&quot;--output&quot;, default=&quot;backups&quot;)
+    parser.add_argument(&quot;--demo&quot;, action=&quot;store_true&quot;, help=&quot;Save synthetic data without connecting&quot;)
+    args = parser.parse_args()
+    devices = json.loads(Path(args.inventory).read_text())
+    if not args.demo:
+        from netmiko import ConnectHandler
+        username = os.environ.get(&quot;NET_USERNAME&quot;) or input(&quot;SSH username: &quot;)
+        password = os.environ.get(&quot;NET_PASSWORD&quot;) or getpass.getpass(&quot;SSH password: &quot;)
+        secret = os.environ.get(&quot;NET_SECRET&quot;, &quot;&quot;)
+    failed = False
+    for device in devices:
+        name = device[&quot;name&quot;]
+        try:
+            if not re.fullmatch(r&quot;[A-Za-z0-9_-]+&quot;, name):
+                raise ValueError(&quot;Invalid device name&quot;)
+            if args.demo:
+                config = &quot;! SYNTHETIC DEMO, not a live backup\nhostname &quot; + name + &quot;\n&quot;
+            else:
+                with ConnectHandler(host=device[&quot;host&quot;], port=device.get(&quot;port&quot;,22),
+                        device_type=&quot;cisco_ios&quot;, username=username, password=password,
+                        secret=secret, ssh_strict=True, system_host_keys=True,
+                        conn_timeout=10, auth_timeout=15) as connection:
+                    if secret:
+                        connection.enable()
+                    config = connection.send_command(&quot;show running-config&quot;, read_timeout=60)
+            path = save_backup(args.output, name, config)
+            print(name + &quot;: saved &quot; + str(path))
+        except Exception as error:
+            # Avoid logging raw exception messages that may contain session data.
+            print(name + &quot;: failed (&quot; + type(error).__name__ + &quot;)&quot;, file=sys.stderr)
+            failed = True
+    return 1 if failed else 0
+if __name__ == &quot;__main__&quot;:
+    sys.exit(main())
+</pre></main></body></html>
